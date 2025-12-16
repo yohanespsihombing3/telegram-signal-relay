@@ -1,11 +1,12 @@
-from flask import Flask, request, jsonify
-import requests
 import os
+import requests
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+
 
 def send_telegram(msg):
     if not BOT_TOKEN or not CHAT_ID:
@@ -37,19 +38,21 @@ def webhook():
         return jsonify({"error": "No JSON received"}), 400
 
     msg = f"""
-<b>{data.get('prefix', 'SIGNAL')}</b>
+<b>🚀 DEWASMC ELITE SIGNAL</b>
 
 📊 <b>Symbol:</b> {data.get('symbol', '-')}
+⏱ <b>TF:</b> {data.get('timeframe', '-')}
 📈 <b>Direction:</b> {data.get('direction', '-')}
+
 🎯 <b>Entry:</b> {data.get('entry', '-')}
 🛑 <b>SL:</b> {data.get('stoploss', '-')}
 
-TP1: {data.get('tp1', '-')}
-TP2: {data.get('tp2', '-')}
-TP3: {data.get('tp3', '-')}
+✅ <b>TP1:</b> {data.get('tp1', '-')}
+✅ <b>TP2:</b> {data.get('tp2', '-')}
+✅ <b>TP3:</b> {data.get('tp3', '-')}
 
-EMA: {data.get('ema_confirm', '-')}
-Confidence: {data.get('confidence', '-')}
+📐 <b>EMA:</b> {data.get('ema_confirm', '-')}
+🔥 <b>Volatility:</b> {data.get('volatility', '-')}
 """
 
     sent = send_telegram(msg)
