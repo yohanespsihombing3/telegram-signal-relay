@@ -14,6 +14,7 @@ def send_telegram(msg):
         print("❌ BOT_TOKEN atau CHAT_ID belum diset")
         return False
 
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
@@ -66,5 +67,7 @@ msg = f"""
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
 
