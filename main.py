@@ -34,36 +34,27 @@ def home():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(silent=True)
-
+    data = request.json
     if not data:
         return jsonify({"error": "No JSON received"}), 400
 
-    signal_type = data.get("type", "SIGNAL")
-
-msg = f"""
-<b>🚀 DEWASMC ELITE {signal_type}</b>
+    msg = f"""
+<b>{data.get('prefix', 'SIGNAL')}</b>
+<b>🚀 DEWASMC ELITE SIGNAL</b>
 
 📊 <b>Symbol:</b> {data.get('symbol', '-')}
 ⏱ <b>TF:</b> {data.get('tf', '-')}
+📈 <b>Direction:</b> {data.get('side', '-')}
 
-📈 <b>Side:</b> {data.get('side', '-')}
-
-🎯 <b>Entry:</b> {data.get('entry', data.get('level', '-'))}
+🎯 <b>Entry:</b> {data.get('entry', '-')}
 🛑 <b>SL:</b> {data.get('sl', '-')}
 
-🎯 <b>TP:</b> {data.get('tp', '-')}
-
-#DEWASMC #SMC #AUTO
+TP: {data.get('tp', '-')}
 """
-
 
     sent = send_telegram(msg)
 
-    if sent:
-        return jsonify({"status": "sent"}), 200
-    else:
-        return jsonify({"status": "failed"}), 500
+    return jsonify({"status": "ok", "sent": sent}), 200
 
 
 if __name__ == "__main__":
