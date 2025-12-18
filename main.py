@@ -1,6 +1,7 @@
-import os
-import requests
 from flask import Flask, request, jsonify
+import requests
+import os
+
 
 app = Flask(__name__)
 
@@ -37,23 +38,24 @@ def webhook():
     if not data:
         return jsonify({"error": "No JSON received"}), 400
 
-    msg = f"""
-<b>🚀 DEWASMC ELITE SIGNAL</b>
+    signal_type = data.get("type", "SIGNAL")
+
+msg = f"""
+<b>🚀 DEWASMC ELITE {signal_type}</b>
 
 📊 <b>Symbol:</b> {data.get('symbol', '-')}
-⏱ <b>TF:</b> {data.get('timeframe', '-')}
-📈 <b>Direction:</b> {data.get('direction', '-')}
+⏱ <b>TF:</b> {data.get('tf', '-')}
 
-🎯 <b>Entry:</b> {data.get('entry', '-')}
-🛑 <b>SL:</b> {data.get('stoploss', '-')}
+📈 <b>Side:</b> {data.get('side', '-')}
 
-✅ <b>TP1:</b> {data.get('tp1', '-')}
-✅ <b>TP2:</b> {data.get('tp2', '-')}
-✅ <b>TP3:</b> {data.get('tp3', '-')}
+🎯 <b>Entry:</b> {data.get('entry', data.get('level', '-'))}
+🛑 <b>SL:</b> {data.get('sl', '-')}
 
-📐 <b>EMA:</b> {data.get('ema_confirm', '-')}
-🔥 <b>Volatility:</b> {data.get('volatility', '-')}
+🎯 <b>TP:</b> {data.get('tp', '-')}
+
+#DEWASMC #SMC #AUTO
 """
+
 
     sent = send_telegram(msg)
 
