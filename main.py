@@ -1,96 +1,158 @@
+import json
+import time
+import hashlib
 from flask import Flask, request, jsonify
 import requests
 import os
 
+# =========================
+# BASIC CONFIG
+# =========================
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+PORT = int(os.getenv("PORT", 5000))
 
+# Telegram config (optional)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-def send_telegram(msg):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("❌ BOT_TOKEN atau CHAT_ID belum diset")
-        return False
+# =========================
+# ANTI SPAM MEMORY
+# =========================
+LAST_SIGNAL = {}
+SIGNAL_COOLDOWN = 60  # seconds
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+# =========================
+# HELPER FUNCTIONS
+# =========================
+
+def safe_get(data, key, default="N/A"):
+    """Safe JSON getter"""
+    return str(data.get(key, default))
+
+def signal_hash(data):
+    """Create unique signal fingerprint"""
+    raw = (
+        safe_get(data, "symbol") +
+        safe_get(data, "timeframe") +
+        safe_get(data, "direction") +
+        safe_get(data, "entry")
+    )
+    return hashlib.md5(raw.encode()).hexdigest()
+
+def is_duplicate(sig_hash):
+    """Anti duplicate signal"""
+    now = time.time()
+    last_time = LAST_SIGNAL.get(sig_hash)
+
+    if last_time and (now - last_time) < SIGNAL_COOLDOWN:
+        return True
+
+    LAST_SIGNAL[sig_hash] = now
+    return False
+
+def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": CHAT_ID,
-        "text": msg,
-        "parse_mode": "HTML"
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
     }
 
-    r = requests.post(url, json=payload)
-    print("📨 Telegram response:", r.text)
-    return r.ok
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print("Telegram error:", e)
 
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Webhook is running"
-
+# =========================
+# WEBHOOK ENDPOINT
+# =========================
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(silent=True)
+    try:
+        data = request.get_json(force=True)
+    except Exception:
+        return jsonify({"status": "error", "reason": "Invalid JSON"}), 400
 
-    if not data:
-        return jsonify({"error": "No JSON received"}), 400
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "reason": "JSON must be object"}), 400
 
-    signal_type = data.get("type", "SIGNAL")
+    # Required minimal fields
+    required = ["type", "symbol", "direction", "entry"]
 
-    # ======================
-    # PREPARE MESSAGE
-    # ======================
-    if signal_type == "PREPARE":
-        msg = f"""
-<b>🟡 DEWASMC PREPARE</b>
+    for field in required:
+        if field not in data:
+            return jsonify({
+                "status": "error",
+                "reason": f"Missing field: {field}"
+            }), 400
 
-📊 <b>Symbol:</b> {data.get('symbol', '-')}
-⏱ <b>TF:</b> {data.get('tf', '-')}
+    # Duplicate check
+    sig_hash = signal_hash(data)
+    if is_duplicate(sig_hash):
+        return jsonify({
+            "status": "ignored",
+            "reason": "Duplicate signal"
+        }), 200
 
-📈 <b>Side:</b> {data.get('side', '-')}
-⚡ <b>EMA Confirm:</b> {data.get('ema_confirm', '-')}
+    # =========================
+    # PARSE DATA SAFELY
+    # =========================
+    symbol     = safe_get(data, "symbol")
+    tf         = safe_get(data, "timeframe")
+    direction  = safe_get(data, "direction")
+    entry      = safe_get(data, "entry")
+    sl         = safe_get(data, "stoploss")
+    tp1        = safe_get(data, "tp1")
+    tp2        = safe_get(data, "tp2")
+    tp3        = safe_get(data, "tp3")
+    ema_conf   = safe_get(data, "ema_confirm")
+    confidence = safe_get(data, "confidence")
 
-⏳ <i>Menunggu valid BOS / CHoCH</i>
+    # =========================
+    # TELEGRAM MESSAGE
+    # =========================
+    message = f"""
+🚀 *NEW SIGNAL*
+━━━━━━━━━━━━━━
+📊 Symbol : `{symbol}`
+⏱ TF     : `{tf}`
+📈 Type   : *{direction}*
+🎯 Entry  : `{entry}`
+🛑 SL     : `{sl}`
 
-#DEWASMC #PREPARE
+🎯 TP1    : `{tp1}`
+🎯 TP2    : `{tp2}`
+🎯 TP3    : `{tp3}`
+
+📉 EMA    : *{ema_conf}*
+🧠 Conf   : *{confidence}*
+━━━━━━━━━━━━━━
 """
-        send_telegram(msg)
-        return jsonify({"status": "prepare sent"}), 200
 
-    # ======================
-    # ENTRY MESSAGE
-    # ======================
-    if signal_type == "ENTRY":
-        msg = f"""
-<b>🚀 DEWASMC ENTRY</b>
+    send_telegram(message)
 
-📊 <b>Symbol:</b> {data.get('symbol', '-')}
-⏱ <b>TF:</b> {data.get('tf', '-')}
+    print("Signal received:", json.dumps(data, indent=2))
 
-📈 <b>Side:</b> {data.get('side', '-')}
+    return jsonify({
+        "status": "success",
+        "symbol": symbol,
+        "direction": direction
+    }), 200
 
-🎯 <b>Entry:</b> {data.get('entry', '-')}
-🛑 <b>SL:</b> {data.get('sl', '-')}
+# =========================
+# HEALTH CHECK
+# =========================
+@app.route("/", methods=["GET"])
+def health():
+    return "Webhook running OK", 200
 
-🎯 <b>TP1:</b> {data.get('tp1', '-')}
-🎯 <b>TP2:</b> {data.get('tp2', '-')}
-🎯 <b>TP3:</b> {data.get('tp3', '-')}
-
-⚡ <b>EMA Confirm:</b> {data.get('ema_confirm', '-')}
-
-#DEWASMC #ENTRY #SMC
-"""
-        send_telegram(msg)
-        return jsonify({"status": "entry sent"}), 200
-
-    # ======================
-    # UNKNOWN TYPE
-    # ======================
-    return jsonify({"status": "ignored"}), 200
-
-
+# =========================
+# MAIN
+# =========================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
