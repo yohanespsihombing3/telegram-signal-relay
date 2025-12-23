@@ -1,158 +1,117 @@
-import json
 import time
 import hashlib
-from flask import Flask, request, jsonify
 import requests
 import os
+from flask import Flask, request, jsonify
 
-# =========================
-# BASIC CONFIG
-# =========================
+# ======================
+# APP INIT
+# ======================
 app = Flask(__name__)
+PORT = int(os.getenv("PORT", 10000))
 
-PORT = int(os.getenv("PORT", 5000))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Telegram config (optional)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-
-# =========================
-# ANTI SPAM MEMORY
-# =========================
+# ======================
+# SIGNAL LOCK (ANTI DUPLICATE)
+# ======================
 LAST_SIGNAL = {}
-SIGNAL_COOLDOWN = 60  # seconds
+LOCK_TIME = 60  # seconds
 
-# =========================
-# HELPER FUNCTIONS
-# =========================
-
-def safe_get(data, key, default="N/A"):
-    """Safe JSON getter"""
+# ======================
+# UTILS
+# ======================
+def safe(data, key, default="N/A"):
     return str(data.get(key, default))
 
-def signal_hash(data):
-    """Create unique signal fingerprint"""
-    raw = (
-        safe_get(data, "symbol") +
-        safe_get(data, "timeframe") +
-        safe_get(data, "direction") +
-        safe_get(data, "entry")
-    )
+def make_hash(symbol, side, price):
+    raw = f"{symbol}-{side}-{price}"
     return hashlib.md5(raw.encode()).hexdigest()
 
-def is_duplicate(sig_hash):
-    """Anti duplicate signal"""
+def is_locked(sig_hash):
     now = time.time()
-    last_time = LAST_SIGNAL.get(sig_hash)
-
-    if last_time and (now - last_time) < SIGNAL_COOLDOWN:
-        return True
-
+    if sig_hash in LAST_SIGNAL:
+        if now - LAST_SIGNAL[sig_hash] < LOCK_TIME:
+            return True
     LAST_SIGNAL[sig_hash] = now
     return False
 
-def send_telegram(message):
+def send_telegram(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram ENV missing")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
+        "text": msg
     }
 
     try:
-        requests.post(url, json=payload, timeout=5)
+        r = requests.post(url, json=payload, timeout=10)
+        print("Telegram:", r.status_code, r.text)
     except Exception as e:
         print("Telegram error:", e)
 
-# =========================
-# WEBHOOK ENDPOINT
-# =========================
-
+# ======================
+# WEBHOOK
+# ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
         data = request.get_json(force=True)
     except Exception:
-        return jsonify({"status": "error", "reason": "Invalid JSON"}), 400
+        return jsonify({"status": "error", "msg": "Invalid JSON"}), 400
 
-    if not isinstance(data, dict):
-        return jsonify({"status": "error", "reason": "JSON must be object"}), 400
+    # ===== REQUIRED FIELDS =====
+    required = ["symbol", "side", "price"]
+    for r in required:
+        if r not in data:
+            return jsonify({"status": "error", "msg": f"Missing {r}"}), 400
 
-    # Required minimal fields
-    required = ["type", "symbol", "direction", "entry"]
+    symbol = safe(data, "symbol")
+    tf     = safe(data, "timeframe")
+    side   = safe(data, "side")
+    price  = safe(data, "price")
+    sl     = safe(data, "sl")
+    tp     = safe(data, "tp")
+    ema    = safe(data, "ema_confirm", "NO")
 
-    for field in required:
-        if field not in data:
-            return jsonify({
-                "status": "error",
-                "reason": f"Missing field: {field}"
-            }), 400
+    # ===== ANTI DUPLICATE =====
+    sig_hash = make_hash(symbol, side, price)
+    if is_locked(sig_hash):
+        return jsonify({"status": "ignored", "reason": "duplicate signal"}), 200
 
-    # Duplicate check
-    sig_hash = signal_hash(data)
-    if is_duplicate(sig_hash):
-        return jsonify({
-            "status": "ignored",
-            "reason": "Duplicate signal"
-        }), 200
-
-    # =========================
-    # PARSE DATA SAFELY
-    # =========================
-    symbol     = safe_get(data, "symbol")
-    tf         = safe_get(data, "timeframe")
-    direction  = safe_get(data, "direction")
-    entry      = safe_get(data, "entry")
-    sl         = safe_get(data, "stoploss")
-    tp1        = safe_get(data, "tp1")
-    tp2        = safe_get(data, "tp2")
-    tp3        = safe_get(data, "tp3")
-    ema_conf   = safe_get(data, "ema_confirm")
-    confidence = safe_get(data, "confidence")
-
-    # =========================
-    # TELEGRAM MESSAGE
-    # =========================
+    # ===== TELEGRAM MESSAGE =====
     message = f"""
-🚀 *NEW SIGNAL*
-━━━━━━━━━━━━━━
-📊 Symbol : `{symbol}`
-⏱ TF     : `{tf}`
-📈 Type   : *{direction}*
-🎯 Entry  : `{entry}`
-🛑 SL     : `{sl}`
-
-🎯 TP1    : `{tp1}`
-🎯 TP2    : `{tp2}`
-🎯 TP3    : `{tp3}`
-
-📉 EMA    : *{ema_conf}*
-🧠 Conf   : *{confidence}*
-━━━━━━━━━━━━━━
+NEW TRADE INFO
+------------------------
+Symbol   : {symbol}
+TF       : {tf}
+Side     : {side}
+Entry    : {price}
+Stoploss : {sl}
+TakeProfit : {tp}
+EMA Confirm : {ema}
+------------------------
 """
 
-    send_telegram(message)
+    send_telegram(message.strip())
 
-    print("Signal received:", json.dumps(data, indent=2))
+    print("Signal sent:", data)
 
-    return jsonify({
-        "status": "success",
-        "symbol": symbol,
-        "direction": direction
-    }), 200
+    return jsonify({"status": "success"}), 200
 
-# =========================
+# ======================
 # HEALTH CHECK
-# =========================
+# ======================
 @app.route("/", methods=["GET"])
-def health():
-    return "Webhook running OK", 200
+def home():
+    return "Webhook Trade Info Running", 200
 
-# =========================
-# MAIN
-# =========================
+# ======================
+# RUN
+# ======================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
