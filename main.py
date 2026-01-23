@@ -1,65 +1,143 @@
-from flask import Flask, request, jsonify
-import requests
+from fastapi import FastAPI, Request
+from pybit.unified_trading import HTTP
 import os
-from datetime import datetime
+import time
 
-app = Flask(__name__)
+app = FastAPI()
 
-# =========================
-# ENV
-# =========================
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+bybit = HTTP(
+    api_key=os.getenv("BYBIT_API_KEY"),
+    api_secret=os.getenv("BYBIT_API_SECRET"),
+    testnet=False
+)
 
 # =========================
-# TELEGRAM SENDER
+# CONFIG
 # =========================
-def send_telegram(text):
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": False
-    }
-    return requests.post(TG_URL, json=payload, timeout=10)
+RISK_PERCENT = 0.5        # % risk per trade
+TP1_CLOSE_RATIO = 0.5    # 50%
+CATEGORY = "linear"
 
 # =========================
-# HEALTH CHECK
+# STATE (SIMPLE MEMORY)
 # =========================
-@app.route("/", methods=["GET"])
-def home():
-    return "TradingView → Telegram Relay ACTIVE", 200
+active_trade = {}
+
+# =========================
+# UTILS
+# =========================
+def get_position(symbol):
+    pos = bybit.get_positions(category=CATEGORY, symbol=symbol)
+    for p in pos["result"]["list"]:
+        if float(p["size"]) > 0:
+            return p
+    return None
+
+def calculate_qty(entry, sl, balance, risk_pct):
+    risk_usd = balance * (risk_pct / 100)
+    sl_distance = abs(entry - sl)
+    return round(risk_usd / sl_distance, 3)
+
+def get_balance():
+    bal = bybit.get_wallet_balance(accountType="UNIFIED")
+    return float(bal["result"]["list"][0]["totalEquity"])
 
 # =========================
 # WEBHOOK
 # =========================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json(force=True)
+@app.post("/webhook")
+async def webhook(req: Request):
+    data = await req.json()
 
-    symbol = data.get("symbol", "UNKNOWN")
-    exchange = data.get("exchange", "BINANCE")
-    timeframe = data.get("timeframe", "N/A")
+    # ===== FILTER WAJIB =====
+    if data.get("type") != "ENTRY":
+        return {"status": "ignored"}
 
-    tv_link = f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}"
+    if data.get("ema_confirm") != "YES":
+        return {"status": "ema not confirmed"}
 
-    message = f"""
-🚨 <b>NEW SIGNAL</b>
+    if data.get("volatility") != "OK":
+        return {"status": "low volatility"}
 
-<b>Symbol:</b> {symbol}
-<b>Timeframe:</b> {timeframe}
+    symbol = data["symbol"] + "USDT"
 
-🔗 <a href="{tv_link}">OPEN LIVE CHART</a>
-"""
+    # Cegah double posisi
+    if get_position(symbol):
+        return {"status": "position already open"}
 
-    send_telegram(message)
+    side = "Buy" if data["direction"] == "LONG" else "Sell"
 
-    return jsonify({"status": "sent"}), 200
+    entry = float(data["entry"])
+    sl = float(data["stoploss"])
+    tp1 = float(data["tp1"])
+
+    balance = get_balance()
+    qty = calculate_qty(entry, sl, balance, RISK_PERCENT)
+
+    # ===== ENTRY =====
+    bybit.place_order(
+        category=CATEGORY,
+        symbol=symbol,
+        side=side,
+        orderType="Market",
+        qty=qty,
+        stopLoss=sl,
+        timeInForce="GoodTillCancel"
+    )
+
+    active_trade[symbol] = {
+        "side": side,
+        "entry": entry,
+        "tp1": tp1,
+        "qty": qty,
+        "tp1_hit": False
+    }
+
+    return {"status": "entry placed", "qty": qty}
 
 # =========================
-# RUN
+# PRICE MONITOR (TP1 + BE)
 # =========================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+@app.on_event("startup")
+async def monitor():
+    while True:
+        try:
+            for symbol, trade in list(active_trade.items()):
+                if trade["tp1_hit"]:
+                    continue
 
+                ticker = bybit.get_tickers(category=CATEGORY, symbol=symbol)
+                price = float(ticker["result"]["list"][0]["lastPrice"])
+
+                hit_tp1 = (
+                    price >= trade["tp1"]
+                    if trade["side"] == "Buy"
+                    else price <= trade["tp1"]
+                )
+
+                if hit_tp1:
+                    close_qty = round(trade["qty"] * TP1_CLOSE_RATIO, 3)
+
+                    # Close 50%
+                    bybit.place_order(
+                        category=CATEGORY,
+                        symbol=symbol,
+                        side="Sell" if trade["side"] == "Buy" else "Buy",
+                        orderType="Market",
+                        qty=close_qty,
+                        reduceOnly=True
+                    )
+
+                    # Move SL to BE
+                    bybit.set_trading_stop(
+                        category=CATEGORY,
+                        symbol=symbol,
+                        stopLoss=trade["entry"]
+                    )
+
+                    trade["tp1_hit"] = True
+
+        except Exception as e:
+            print("ERROR:", e)
+
+        time.sleep(2)
